@@ -1,0 +1,6 @@
+loguru
+dropbox
+pandas
+streamlit
+streamlit-authenticator
+python-dotenv
