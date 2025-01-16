@@ -130,6 +130,7 @@ if st.session_state['authentication_status']:
             except Exception as e:
                 logger.error(e)
                 st.error(f"❌ An error occurred: {e}")
+                
 
 elif st.session_state['authentication_status'] is False:
     st.error('Username/password is incorrect')
