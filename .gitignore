@@ -169,3 +169,4 @@ cython_debug/
 !eval/data/eval_20240408_200249.pkl
 
 */secret.yaml
+*/credentials/secret.yaml

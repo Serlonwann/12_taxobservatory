@@ -1,18 +1,23 @@
 import dropbox
+from dropbox.oauth import DropboxOAuth2FlowNoRedirect
 from dropbox import exceptions
 from loguru import logger
-import pandas as pd
-import io
 import os
-
 from dotenv import load_dotenv
+import io
+import pandas as pd
+
+# Load environment variables
 load_dotenv()
-# Set your Dropbox Access Token (create app via https://www.dropbox.com/developers/apps/)
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-# Initialize Dropbox client
+
+APP_KEY = os.getenv("DROPBOX_APP_KEY")
+APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+
+# Obtain access token using refresh token
 try:
-    dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-    logger.info("Connected to Dropbox successfully.")
+    dbx = dropbox.Dropbox(oauth2_refresh_token=REFRESH_TOKEN, app_key=APP_KEY, app_secret=APP_SECRET)
+    logger.info("Connected to Dropbox successfully using refresh token.")
 except Exception as e:
     logger.error(f"Error connecting to Dropbox: {e}")
     raise
