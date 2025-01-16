@@ -188,7 +188,7 @@ def _download_pdf_to_dropbox(pdf_url: str, company: str, year: str):
     # Clean up company name for a valid file path or use your own normalization
     safe_company = "".join(c for c in company if c.isalnum() or c in (' ', '-', '_')).replace(" ", "_")
     file_name = f"{safe_company}_{year}.pdf"
-    dropbox_path = f"/CbCRs/{company}/{file_name}"
+    dropbox_path = f"/CbCRs/{company}/{original_filename}"
 
     # Upload to Dropbox
     file_bytes = io.BytesIO(pdf_response.content)

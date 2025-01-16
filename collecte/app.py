@@ -126,7 +126,7 @@ if st.session_state['authentication_status']:
                     blacklist_urls=blacklist_urls,
                     restrict_url=restrict_url
                 )
-                st.success("🎉 PDF Downloading Process Completed!")
+                st.success("🎉 PDF downloading process completed, go check dropbox for results")
             except Exception as e:
                 logger.error(e)
                 st.error(f"❌ An error occurred: {e}")
