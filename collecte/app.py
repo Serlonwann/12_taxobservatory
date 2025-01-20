@@ -77,8 +77,9 @@ if st.session_state['authentication_status']:
         ## the user can choose to restrict the search to a specific time period
         date_restrict = st.selectbox(
             "Date Restriction",
-            options=["y1", "y2", "y3"],
-            help="Restrict results to a specific time period.",
+            options=["y5", "y4", "y3", "y2", "y1"],
+            index=0,
+            help="Restrict results to a specific time period. ex: y5 = 5 previous years to date.",
         )
 
     # Advanced Settings
@@ -93,7 +94,12 @@ if st.session_state['authentication_status']:
         updated_blacklist_df = st.data_editor(blacklist_df, num_rows="dynamic", use_container_width=True)
 
         if st.button("Save Blacklist"):
-            st.success("Blacklist updated successfully!")
+            from dropbox_client import _save_blacklist_to_dropbox
+            res = _save_blacklist_to_dropbox(updated_blacklist_df)
+            if res:
+                st.success("Blacklist updated successfully!")
+            else:
+                st.error("Error updating blacklist. Please try again.")
 
         fetch_timeout_s = st.number_input(
             "Fetch Timeout (in seconds)",
@@ -130,7 +136,7 @@ if st.session_state['authentication_status']:
             except Exception as e:
                 logger.error(e)
                 st.error(f"❌ An error occurred: {e}")
-                
+
 
 elif st.session_state['authentication_status'] is False:
     st.error('Username/password is incorrect')
