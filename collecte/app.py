@@ -1,6 +1,7 @@
 import streamlit as st
 import streamlit_authenticator as stauth
 from loguru import logger
+import threading
 import os
 from datetime import datetime
 import yaml
@@ -13,7 +14,7 @@ st.set_page_config(
     page_icon="📃"
 )
 
-with open('/credentials/secret.yaml') as file:
+with open('/credentials/secret.yaml') as file: #TODO: change to the correct path
     config = yaml.load(file, Loader=SafeLoader)
 
 authenticator = stauth.Authenticate(
@@ -36,6 +37,11 @@ if st.session_state['authentication_status']:
 
     st.title("📃 CbCR PDFs Finder")
     st.subheader("Search, Find, and Download CbCR PDFs")
+
+    if "stop_event" not in st.session_state:
+        st.session_state.stop_event = threading.Event()
+    if "download_thread" not in st.session_state:
+        st.session_state.download_thread = None
 
     # Tabs for navigation
     tab1, tab2 = st.tabs(["🔍 Search Options", "⚙️ Advanced Settings"])
@@ -74,21 +80,34 @@ if st.session_state['authentication_status']:
             help="Select the year to search for CbCR PDFs.",
         )
 
-        ## the user can choose to restrict the search to a specific time period
-        date_restrict = st.selectbox(
-            "Date Restriction",
-            options=["y5", "y4", "y3", "y2", "y1"],
-            index=0,
-            help="Restrict results to a specific time period. ex: y5 = 5 previous years to date.",
-        )
-
     # Advanced Settings
     with tab2:
         st.markdown("### Advanced Configuration")
 
-        restrict_url = st.checkbox("Restrict downloads to urls that contain company name")
+        restrict_url = st.checkbox("⛓️ Restrict downloads to urls that contain company name")
 
-        st.markdown("Edit the blacklist of URLs to exclude during PDF downloading.")
+        # Subfolder in which the whole search will be saved (default value is CbCRs_<current_date>_<current_time>)
+        if st.checkbox("🗂️ Dropbox Subfolder"):
+            subfolder = st.text_input(
+                "Subfolder Name",
+                value=f"CbCRs_{datetime.now().strftime('%Y%m%d')}",
+                help="Enter the name of the subfolder where the PDFs will be saved.",
+            )
+        else:
+            subfolder = None
+
+        ## the user can choose to restrict the search to a specific time period
+        if st.checkbox("📅 Restrict Search to a Specific Time Period"):
+            date_restrict = st.selectbox(
+                "Date Restriction",
+                options=["y5", "y4", "y3", "y2", "y1"],
+                index=0,
+                help="Restrict results to a specific time period. ex: y5 = 5 previous years to date.",
+            )
+        else:
+            date_restrict = None
+
+        st.markdown("🚫 Edit the blacklist of URLs to exclude during PDF downloading.")
         
         # Load and display blacklist
         updated_blacklist_df = st.data_editor(blacklist_df, num_rows="dynamic", use_container_width=True)
@@ -102,7 +121,7 @@ if st.session_state['authentication_status']:
                 st.error("Error updating blacklist. Please try again.")
 
         fetch_timeout_s = st.number_input(
-            "Fetch Timeout (in seconds)",
+            "⏳ Fetch Timeout (in seconds)",
             min_value=1,
             max_value=300,
             value=60,
@@ -116,27 +135,44 @@ if st.session_state['authentication_status']:
         if st.button("Start Downloading"):
             if not os.getenv("CX_API_KEY") or not os.getenv("GOOGLE_CX"):
                 st.error("Google API Key and CSE ID are required in environment variables.")
-
-            try:
-                # Prepare inputs for downloader
+            def start_download():
+                # Clear any previous stop request
+                st.session_state.stop_event.clear()
+                
+                # Prepare the CSV DataFrame if applicable
                 csv_df = pd.read_csv(src_file) if input_option == "Upload CSV File" else None
-                find_and_download_pdfs(
-                    csv_df=csv_df,
-                    company_name=company_name,
-                    api_key=os.getenv("CX_API_KEY"),
-                    cse_id=os.getenv("GOOGLE_CX"),
-                    keywords=search_keywords,
-                    years=years,
-                    fetch_timeout_s=fetch_timeout_s,
-                    date_restrict=date_restrict,
-                    blacklist_urls=blacklist_urls,
-                    restrict_url=restrict_url
+
+                # Start the download in a separate thread
+                st.session_state.download_thread = threading.Thread(
+                    target=find_and_download_pdfs,
+                    kwargs={
+                        "csv_df": csv_df,
+                        "company_name": company_name,
+                        "api_key": os.getenv("CX_API_KEY"),
+                        "cse_id": os.getenv("GOOGLE_CX"),
+                        "keywords": search_keywords,
+                        "years": years,
+                        "fetch_timeout_s": fetch_timeout_s,
+                        "date_restrict": date_restrict,
+                        "blacklist_urls": blacklist_urls,
+                        "restrict_url": restrict_url,
+                        "stop_event": st.session_state.stop_event,
+                        "subfolder": subfolder,
+                    }
                 )
+                st.session_state.download_thread.start()
+            try:
+                start_download()
+                # Wait for the thread to finish
+                st.session_state.download_thread.join()
                 st.success("🎉 PDF downloading process completed, go check dropbox for results")
             except Exception as e:
                 logger.error(e)
                 st.error(f"❌ An error occurred: {e}")
 
+        if st.button("Stop Downloading"):
+            st.session_state.stop_event.set()
+            st.success("🛑 PDF downloading process stopped")
 
 elif st.session_state['authentication_status'] is False:
     st.error('Username/password is incorrect')

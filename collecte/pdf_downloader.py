@@ -1,6 +1,6 @@
 import os
 import io
-import logging
+import threading
 import requests
 import pandas as pd
 from dropbox_client import dbx  # from the same directory
@@ -8,8 +8,6 @@ from dropbox.exceptions import ApiError
 from dropbox import files
 from urllib.parse import urlparse
 from loguru import logger
-
-METADATA_PATH = "/CbCRs/metadata.csv"
 
 def find_and_download_pdfs(
     csv_df: pd.DataFrame,
@@ -21,24 +19,11 @@ def find_and_download_pdfs(
     fetch_timeout_s: int,
     date_restrict: str,
     blacklist_urls: list,
-    restrict_url: bool
+    restrict_url: bool,
+    stop_event: threading.Event,
+    subfolder: str,
 ) -> None:
-    """
-    Find and download PDFs from Google Custom Search results,
-    optionally using either a csv_df or a single company_name.
-
-    :param csv_df: (pd.DataFrame) DataFrame containing rows of company names (optional).
-    :param company_name: (str) Single company name (optional).
-    :param api_key: (str) Google Custom Search API key.
-    :param cse_id: (str) Google Custom Search Engine ID.
-    :param keywords: (str) Search keywords.
-    :param years: (list) List of years to be appended to the search query.
-    :param fetch_timeout_s: (int) Timeout for the HTTP request to Google CSE.
-    :param date_restrict: (str) Google date restrict parameter (e.g., "y1", "y2", "y3").
-    :param blacklist_urls: (list) List of URL substrings that should be excluded from download.
-    :param restrict_url: (bool) If True, only download PDFs where the PDF URL contains the company name.
-    """
-    metadata_df = _load_metadata_from_dropbox()
+    metadata_df = _load_metadata_from_dropbox(subfolder)
     if csv_df is not None:
         # Process multiple companies from CSV
         logger.info(f"Received CSV with {len(csv_df)} rows.")
@@ -58,6 +43,9 @@ def find_and_download_pdfs(
                 date_restrict=date_restrict,
                 blacklist_urls=blacklist_urls,
                 restrict_url=restrict_url,
+                metadata_df=metadata_df,
+                stop_event=stop_event,
+                subfolder=subfolder,
             )
     else:
         # Process a single company name
@@ -75,7 +63,9 @@ def find_and_download_pdfs(
             date_restrict=date_restrict,
             blacklist_urls=blacklist_urls,
             restrict_url=restrict_url,
-            metadata_df=metadata_df
+            metadata_df=metadata_df,
+            stop_event=stop_event,
+            subfolder=subfolder,
         )
 
 
@@ -89,21 +79,10 @@ def _search_and_download(
     date_restrict: str,
     blacklist_urls: list,
     restrict_url: bool,
-    metadata_df: pd.DataFrame
+    metadata_df: pd.DataFrame,
+    stop_event: threading.Event,
+    subfolder: str,
 ):
-    """
-    Conduct Google CSE searches for the given company/year(s) and download PDFs to Dropbox.
-
-    :param company: (str) Company name.
-    :param api_key: (str) Google Custom Search API key.
-    :param cse_id: (str) Google Custom Search Engine ID.
-    :param keywords: (str) Search keywords.
-    :param years: (list) List of years to be appended to the search query.
-    :param fetch_timeout_s: (int) Timeout for the HTTP request to Google CSE.
-    :param date_restrict: (str) Google date restrict parameter (e.g., "y1", "y2", "y3").
-    :param blacklist_urls: (list) List of URL substrings that should be excluded from download.
-    :param restrict_url: (bool) If True, only download PDFs where the PDF URL contains the company name.
-    """
     # For each year, build the query and fetch results
     for year in years:
         # Construct search query with filetype:pdf
@@ -135,6 +114,10 @@ def _search_and_download(
                 break
 
             for item in items:
+                if stop_event and stop_event.is_set():
+                    logger.warning("Stop event received. Stopping further downloads.")
+                    return
+                
                 link = item.get("link", "")
                 # Check for blacklist
                 if any(bad_url.lower() in link.lower() for bad_url in blacklist_urls):
@@ -154,33 +137,24 @@ def _search_and_download(
                 company = urlparse(link).netloc.split(".")[1]
 
                 # Attempt to download PDF
-                original_filename = _download_pdf_to_dropbox(link, company, year)
-                if original_filename is not None:
-                    # Add a new row to metadata
-                    new_row = pd.DataFrame(
-                        [[company, year, link, original_filename]],
-                        columns=["company", "year", "url", "filename"]
-                    )
-                    metadata_df = pd.concat([metadata_df, new_row], ignore_index=True)
-                _download_pdf_to_dropbox(link, company, year)
+                original_filename, status = _download_pdf_to_dropbox(link, company, year, subfolder)
+                # Add a new row to metadata
+                new_row = pd.DataFrame(
+                    [[company, year, link, original_filename, subfolder, query, status]],
+                    columns=["company", "year", "url", "filename", "folder", "query", "status"]
+                )
+                metadata_df = pd.concat([metadata_df, new_row], ignore_index=True)
+                _download_pdf_to_dropbox(link, company, year, subfolder)
+                _save_metadata_to_dropbox(metadata_df, subfolder)
 
-        _save_metadata_to_dropbox(metadata_df)
-
-def _download_pdf_to_dropbox(pdf_url: str, company: str, year: str):
-    """
-    Download a PDF from pdf_url and upload it to Dropbox under CbCRs/ folder.
-
-    :param pdf_url: (str) URL to the PDF file.
-    :param company: (str) Company name (used in Dropbox file naming).
-    :param year: (str) Year (used in Dropbox file naming).
-    """
+def _download_pdf_to_dropbox(pdf_url: str, company: str, year: str, subfolder: str):
     logger.info(f"Attempting PDF download from {pdf_url}")
     try:
         pdf_response = requests.get(pdf_url, stream=True, timeout=60)
         pdf_response.raise_for_status()
     except Exception as e:
         logger.error(f"Error downloading PDF from {pdf_url}: {e}")
-        return
+        return None, e
     
     # Determine the original filename from Content-Disposition or fallback to last part of URL
     original_filename = _extract_original_filename(pdf_response, pdf_url)
@@ -188,23 +162,24 @@ def _download_pdf_to_dropbox(pdf_url: str, company: str, year: str):
     # Clean up company name for a valid file path or use your own normalization
     safe_company = "".join(c for c in company if c.isalnum() or c in (' ', '-', '_')).replace(" ", "_")
     file_name = f"{safe_company}_{year}.pdf"
-    dropbox_path = f"/CbCRs/{company}/{original_filename}"
+    if subfolder:
+        dropbox_path = f"/CbCRs/{subfolder}/{company}/{file_name}"
+    else:
+        dropbox_path = f"/CbCRs/{company}/{original_filename}"
 
     # Upload to Dropbox
     file_bytes = io.BytesIO(pdf_response.content)
     try:
         dbx.files_upload(file_bytes.getvalue(), dropbox_path, mode=files.WriteMode("overwrite"))
         logger.info(f"Uploaded PDF to Dropbox: {dropbox_path}")
+        status = "OK"
     except Exception as e:
         logger.error(f"Error uploading to Dropbox ({dropbox_path}): {e}")
+        status = e
 
-    return original_filename
+    return original_filename, status
 
 def _extract_original_filename(response: requests.Response, pdf_url: str) -> str:
-    """
-    Extract the original filename from Content-Disposition header if available.
-    Otherwise, fallback to the last part of the URL.
-    """
     content_disp = response.headers.get("Content-Disposition", "")
     if "filename=" in content_disp.lower():
         # Attempt to parse filename from the header
@@ -231,12 +206,12 @@ def _extract_original_filename(response: requests.Response, pdf_url: str) -> str
     return filename
 
 
-def _load_metadata_from_dropbox() -> pd.DataFrame:
-    """
-    Attempt to load metadata.csv from Dropbox. 
-    If not present, return an empty DataFrame with columns: company, year, url, filename.
-    """
+def _load_metadata_from_dropbox(subfolder) -> pd.DataFrame:
     try:
+        if subfolder:
+            METADATA_PATH = f"/CbCRs/{subfolder}/metadata.csv"
+        else:
+            METADATA_PATH = "/CbCRs/metadata.csv"
         md, res = dbx.files_download(METADATA_PATH)
         data = res.content
         df = pd.read_csv(io.BytesIO(data))
@@ -248,17 +223,18 @@ def _load_metadata_from_dropbox() -> pd.DataFrame:
         if isinstance(e.error, files.DownloadError) and isinstance(e.error.get_path(), files.LookupError):
             if e.error.get_path().is_not_found():
                 logger.warning("metadata.csv not found on Dropbox. A new file will be created.")
-                columns = ["company", "year", "url", "filename"]
+                columns = ["company", "year", "url", "filename", "folder", "query", "status"]
                 return pd.DataFrame(columns=columns)
         else:
             logger.error("Error loading metadata from Dropbox: %s", e)
             raise
 
-def _save_metadata_to_dropbox(metadata_df: pd.DataFrame):
-    """
-    Save the given DataFrame to metadata.csv in Dropbox (overwrite if exists).
-    """
+def _save_metadata_to_dropbox(metadata_df: pd.DataFrame, subfolder):
     try:
+        if subfolder:
+            METADATA_PATH = f"/CbCRs/{subfolder}/metadata.csv"
+        else:
+            METADATA_PATH = "/CbCRs/metadata.csv"
         csv_buffer = io.StringIO()
         metadata_df.to_csv(csv_buffer, index=False)
         dbx.files_upload(
