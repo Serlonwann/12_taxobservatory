@@ -8,6 +8,7 @@ from dropbox.exceptions import ApiError
 from dropbox import files
 from urllib.parse import urlparse
 from loguru import logger
+from datetime import datetime
 
 def find_and_download_pdfs(
     csv_df: pd.DataFrame,
@@ -139,9 +140,10 @@ def _search_and_download(
                 # Attempt to download PDF
                 original_filename, status = _download_pdf_to_dropbox(link, company, year, subfolder)
                 # Add a new row to metadata
+                date_string = datetime.now().strftime("%Y-%m-%d %H:%M")
                 new_row = pd.DataFrame(
-                    [[company, year, link, original_filename, subfolder, query, status]],
-                    columns=["company", "year", "url", "filename", "folder", "query", "status"]
+                    [[date_string, company, year, link, original_filename, subfolder, query, status]],
+                    columns=["date", "company", "year", "url", "filename", "folder", "query", "status"]
                 )
                 metadata_df = pd.concat([metadata_df, new_row], ignore_index=True)
                 _download_pdf_to_dropbox(link, company, year, subfolder)
@@ -205,7 +207,6 @@ def _extract_original_filename(response: requests.Response, pdf_url: str) -> str
     logger.debug(f"Extracted filename from URL: {filename}")
     return filename
 
-
 def _load_metadata_from_dropbox(subfolder) -> pd.DataFrame:
     try:
         if subfolder:
@@ -223,7 +224,7 @@ def _load_metadata_from_dropbox(subfolder) -> pd.DataFrame:
         if isinstance(e.error, files.DownloadError) and isinstance(e.error.get_path(), files.LookupError):
             if e.error.get_path().is_not_found():
                 logger.warning("metadata.csv not found on Dropbox. A new file will be created.")
-                columns = ["company", "year", "url", "filename", "folder", "query", "status"]
+                columns = ["date", "company", "year", "url", "filename", "folder", "query", "status"]
                 return pd.DataFrame(columns=columns)
         else:
             logger.error("Error loading metadata from Dropbox: %s", e)
